@@ -1,16 +1,21 @@
 import 'dart:async';
-import 'dart:math';
-
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:map_demo/model/driver.dart';
+import 'package:map_demo/network/network_request.dart';
+import 'package:map_demo/utils/map_utils.dart';
 
-void main() => runApp(MyApp());
+void main() => runApp(const MyApp());
 
 class MyApp extends StatelessWidget {
+  const MyApp({Key? key}) : super(key: key);
+
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
+    return const MaterialApp(
+      debugShowCheckedModeBanner: false,
       title: 'Flutter Google Maps Demo',
       home: MapSample(),
     );
@@ -18,22 +23,28 @@ class MyApp extends StatelessWidget {
 }
 
 class MapSample extends StatefulWidget {
+  const MapSample({Key? key}) : super(key: key);
+
   @override
   State<MapSample> createState() => MapSampleState();
 }
 
 class MapSampleState extends State<MapSample> {
-  final Completer<GoogleMapController> _controller = Completer();
-  late Marker currentPos;
-  late CameraPosition currentCamera;
-  bool isInit = true;
-  late Polyline polyline;
-  Set<Marker> markers = {};
+  //Những state được dùng trong ứng dụng
+  //Những state dùng trong Map
+  late CameraPosition
+      currentCamera; //vị trí camera khi khởi tạo sẽ được gán = với vị trí hiện tại
+  late Polyline polyline; //Những đường polyline sẽ được vẽ trên map
+  Set<Marker> markers = {}; //Những marker sẽ được thể hiện trên map
 
+  //Những state dùng để thể hiện thông tin khi nhấn vào 1 marker, gồm có: link avatar, khoảng cách từ marker đến vị trí hiện tại, tên tài xế
+  late String imgLink;
   late double des;
   late String driverName;
+
+  //Những state để đảm bảo dữ liệu được load trước khi build UI
   bool onClick = false;
-  int count = 0;
+  bool isInit = true;
 
   @override
   void initState() {
@@ -43,84 +54,60 @@ class MapSampleState extends State<MapSample> {
   @override
   void didChangeDependencies() async {
     super.didChangeDependencies();
-    await getCurrentLocation();
+    await MapUtils.getCurrentLocation(); //Lấy bị trí hiện tại
+    await initializeApp(); //Hàm lấy danh sách Driver, gán vị trí cam
   }
 
-  Future<void> getCurrentLocation() async {
-    bool serviceEnabled;
-    LocationPermission permission;
+  //Lấy ảnh avatar từ link và chuyển thành dạng Uint8List để custom marker
+  Future<Uint8List> loadNetworkImage(path) async {
+    final completed = Completer<ImageInfo>();
+    var image = NetworkImage(path);
+    image.resolve(const ImageConfiguration()).addListener(
+        ImageStreamListener((info, _) => completed.complete(info)));
+    final imageInfo = await completed.future;
+    final byteData =
+        await imageInfo.image.toByteData(format: ui.ImageByteFormat.png);
+    return byteData!.buffer.asUint8List();
+  }
 
-    serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (!serviceEnabled) {
-      return Future.error('Location services are disabled');
-    }
+  //Hàm lấy danh sách tài xế từ API, lấy vị trí camera, tạo danh sách các marker để show trên map
+  Future<void> initializeApp() async {
+    markers.add(MapUtils.currentPos); //Gắn marker vị trí hiện tại
 
-    permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-      if (permission == LocationPermission.denied) {
-        return Future.error('Location permissions are denied');
-      }
-    }
-
-    if (permission == LocationPermission.deniedForever) {
-      return Future.error(
-          'Location permissions are permanently denied, we cannot request permissions.');
-    }
-    Position position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high);
-
-    double lat = position.latitude;
-    double long = position.longitude;
-    print("Latitude: $lat and Longitude: $long");
-
-    currentPos = Marker(
-      markerId: MarkerId('currentPos'),
-      infoWindow: InfoWindow(title: "Current Position"),
-      icon: BitmapDescriptor.defaultMarker,
-      position: LatLng(lat, long),
-    );
-
-    markers.add(currentPos);
-
+    //gán vị trí cho camera
     currentCamera = CameraPosition(
-      target: LatLng(lat, long),
+      target: LatLng(MapUtils.currentPos.position.latitude,
+          MapUtils.currentPos.position.longitude),
       zoom: 14.4746,
     );
 
+    //Khởi tạo đường polyline với điểm LatLng đầu tiên là CurrentPos (vị trí hiện tại)
     polyline = Polyline(
-        polylineId: PolylineId('currentLine'),
+        polylineId: const PolylineId('currentLine'),
         points: [
-          LatLng(currentPos.position.latitude, currentPos.position.longitude),
+          LatLng(MapUtils.currentPos.position.latitude,
+              MapUtils.currentPos.position.longitude),
         ],
         width: 2);
 
-    setState(() {
-      isInit = false;
-    });
-  }
+    //Lấy danh sách tài xế từ API
+    List<Driver> driverList = await NetworkRequest.getDrivers();
 
-  double calculateDistance(lat1, lon1, lat2, lon2) {
-    var p = 0.017453292519943295;
-    var a = 0.5 -
-        cos((lat2 - lat1) * p) / 2 +
-        cos(lat1 * p) * cos(lat2 * p) * (1 - cos((lon2 - lon1) * p)) / 2;
-    return 12742 * asin(sqrt(a));
-  }
+    //Khởi tạo các marker từ danh sách tài xế
+    for (var driver in driverList) {
+      double lat = double.parse(driver.geolocation!.split(',')[0]);
+      double long = double.parse(driver.geolocation!.split(',')[1]);
 
-  void addRandomMaker() {
-    Random random = Random();
-    String id = random.nextDouble().toString();
-    String name = (count++).toString();
-    double lat = currentPos.position.latitude +
-        (random.nextBool()
-            ? random.nextDouble() / 100
-            : -random.nextDouble() / 100);
-    double long = currentPos.position.longitude -
-        (random.nextBool()
-            ? random.nextDouble() / 100
-            : -random.nextDouble() / 100);
-    setState(() {
+      Uint8List image = await loadNetworkImage(driver.avatar);
+      final ui.Codec markerImageCodec = await ui.instantiateImageCodec(
+          image.buffer.asUint8List(),
+          targetHeight: 150,
+          targetWidth: 150);
+      final ui.FrameInfo frameInfo = await markerImageCodec.getNextFrame();
+      final ByteData? byteData =
+          await frameInfo.image.toByteData(format: ui.ImageByteFormat.png);
+      final Uint8List resizedImageMarker = byteData!.buffer.asUint8List();
+
       markers.add(Marker(
           onTap: () {
             setState(() {
@@ -130,29 +117,32 @@ class MapSampleState extends State<MapSample> {
                 polyline.points.removeLast();
                 polyline.points.add(LatLng(lat, long));
               }
-              des = calculateDistance(currentPos.position.latitude,
-                  currentPos.position.longitude, lat, long);
-              driverName = name;
-              onClick = true;
+              des = MapUtils.calculateDistance(
+                  MapUtils.currentPos.position.latitude,
+                  MapUtils.currentPos.position.longitude,
+                  lat,
+                  long);
+              driverName = driver.name!;
+              imgLink = driver.avatar!;
+              onClick =
+                  true; //Đánh dấu việc có thể click vào marker để thể hiện 1 ô thông tin cần thiết
             });
           },
-          markerId: MarkerId(id),
-          infoWindow: InfoWindow(title: name),
-          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
+          markerId: MarkerId(driver.name!),
+          infoWindow: InfoWindow(title: driver.name!),
+          icon: BitmapDescriptor.fromBytes(resizedImageMarker),
           position: LatLng(lat, long)));
+    }
+
+    //Đánh dấu việc load dữ liệu đã xong để tắt đi CircularProgressIndicator()
+    setState(() {
+      isInit = false;
     });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      floatingActionButtonLocation: FloatingActionButtonLocation.startDocked,
-      floatingActionButton: FloatingActionButton(
-        child: Icon(Icons.add),
-        onPressed: () {
-          addRandomMaker();
-        },
-      ),
       body: isInit
           ? const Center(child: CircularProgressIndicator())
           : Stack(
@@ -162,57 +152,59 @@ class MapSampleState extends State<MapSample> {
                   markers: markers,
                   polylines: {polyline},
                   initialCameraPosition: currentCamera,
-                  onMapCreated: (GoogleMapController controller) {
-                    _controller.complete(controller);
-                  },
                 ),
-                onClick
-                    ? Padding(
-                        padding: EdgeInsets.only(
-                            top: MediaQuery.of(context).size.height * 0.85),
-                        child: Center(
-                          child: Container(
-                            width: MediaQuery.of(context).size.width * 0.9,
-                            height: MediaQuery.of(context).size.width * 0.225,
-                            decoration: BoxDecoration(
-                                borderRadius: BorderRadius.circular(12),
-                                color: Colors.white),
-                            child: Padding(
-                              padding: EdgeInsets.all(15),
-                              child: Row(
+                if (onClick)
+                  Padding(
+                    padding: EdgeInsets.only(
+                        top: MediaQuery.of(context).size.height * 0.85),
+                    child: Center(
+                      child: Container(
+                        width: MediaQuery.of(context).size.width * 0.9,
+                        height: MediaQuery.of(context).size.width * 0.225,
+                        decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(12),
+                            color: Colors.white),
+                        child: Padding(
+                          padding: const EdgeInsets.all(15),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.start,
+                            children: [
+                              CircleAvatar(
+                                radius: 30.0,
+                                backgroundImage: NetworkImage(imgLink),
+                                backgroundColor: Colors.transparent,
+                              ),
+                              const SizedBox(
+                                width: 20,
+                              ),
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  CircleAvatar(
-                                    radius: 48,
-                                    backgroundImage:
-                                        AssetImage('assets/images/avatar.jpg'),
+                                  Text(
+                                    'Destination: ${des.toStringAsFixed(8)}',
+                                    style: const TextStyle(
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.normal),
                                   ),
-                                  Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        'Destination: ' +
-                                            des.toStringAsFixed(6),
-                                        style: TextStyle(
-                                            fontSize: 20,
-                                            fontWeight: FontWeight.bold),
-                                      ),
-                                      Spacer(),
-                                      Text(
-                                        'Driver Name: ' + driverName,
-                                        style: TextStyle(
-                                            fontSize: 20,
-                                            fontWeight: FontWeight.bold),
-                                      )
-                                    ],
+                                  const SizedBox(
+                                    height: 15,
                                   ),
+                                  Text(
+                                    'Driver Name: $driverName',
+                                    style: const TextStyle(
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.normal),
+                                  )
                                 ],
                               ),
-                            ),
+                            ],
                           ),
                         ),
-                      )
-                    : Container()
+                      ),
+                    ),
+                  )
+                else
+                  Container()
               ],
             ),
     );
